@@ -5,19 +5,19 @@
 
 #include <iostream>
 
-cv::Mat difference_of_gaussians(
-    cv::Mat& src, int k1, double s1, int k2, double s2);
-cv::Mat substract_no_saturation(cv::Mat& mat1, cv::Mat& mat2);
+cv::RNG rng(12345);
 
-void thresh_callback(int, void*);
+using contour = std::vector<cv::Point>;
 
-/**
- * @function main
- */
+struct objects
+{
+    cv::Mat img;
+    contour contour_;
+    bool    have_similar;
+};
+
 int main(int argc, char** argv)
 {
-    //! [setup]
-    /// Load source image
     cv::CommandLineParser parser(
         argc, argv, "{@input | ../img/vegetables.jpg | input image}");
     cv::Mat src =
@@ -30,74 +30,120 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    cv::Mat src_gray;
-    cv::cvtColor(src, src_gray, cv::COLOR_BGR2GRAY);
-    cv::Mat copy = src.clone();
+    cv::Mat gray;
+    cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
 
-    cv::Mat dog_output = difference_of_gaussians(src_gray, 5, 5., 21, 19.);
+    cv::Mat filtred;
+    cv::bilateralFilter(gray, filtred, 11, 17, 17);
 
-    cv::imshow("DoG", dog_output);
+    cv::Canny(filtred, filtred, 30, 90);
 
-    cv::Mat threshold_output;
-    cv::threshold(dog_output,
-                  threshold_output,
-                  127,
-                  255,
-                  cv::THRESH_BINARY + cv::THRESH_OTSU);
+    cv::imshow("canny", filtred);
+    cv::waitKey(0);
 
-    std::vector<std::vector<cv::Point>> contours;
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(7, 7));
+
+    cv::Mat closed;
+    cv::morphologyEx(filtred, closed, cv::MORPH_CLOSE, kernel);
+
+    std::vector<contour> contours;
     cv::findContours(
-        threshold_output, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+        closed, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
 
-    for (auto& contour : contours)
-    {
-        double area = cv::contourArea(contour);
-        if (area > 1500)
+    std::vector<objects> templates;
+
+    cv::Mat with_contours;
+    src.copyTo(with_contours);
+
+    for (int i = 0; i < contours.size(); i++)
+        if (cv::contourArea(contours[i]) > 100.)
         {
-            cv::Rect r      = cv::boundingRect(contour);
-            double   extent = area / (r.width * r.height);
-            if (extent > 0.6)
-            {
-                cv::RotatedRect min_r = cv::minAreaRect(contour);
-
-                cv::Point2f points[4];
-                min_r.points(points);
-                for (int i = 0; i < 4; i++)
-                    cv::line(copy,
-                             points[i],
-                             points[(i + 1) % 4],
-                             cv::Scalar(0, 255, 0),
-                             4);
-            }
+            cv::Rect rect = cv::boundingRect(contours[i]);
+            templates.push_back({ gray(cv::Range(rect.y, rect.y + rect.height),
+                                       cv::Range(rect.x, rect.x + rect.width)),
+                                  contours[i],
+                                  false });
+            cv::drawContours(
+                with_contours, contours, i, cv::Scalar(0, 255, 0), 2);
         }
+
+    imshow("contours", with_contours);
+    cv::waitKey(0);
+
+    for (int i = 0; i < templates.size(); i++)
+    {
+        imshow("template", templates[i].img);
+
+        cv::Mat res(gray.rows - templates[i].img.rows + 1,
+                    gray.cols - templates[i].img.cols + 1,
+                    CV_32FC1);
+        cv::matchTemplate(gray, templates[i].img, res, cv::TM_CCOEFF_NORMED);
+
+        double thresh =
+            templates[i].img.rows * templates[i].img.cols < 10000 ? 0.9 : 0.75;
+        cv::threshold(res, res, thresh, 1., cv::THRESH_BINARY);
+
+        res.convertTo(res, CV_8U, 255.);
+        imshow("result_thresh", res);
+
+        std::vector<cv::Rect> found_similar;
+        while (true)
+        {
+            double    maxval, threshold = 255. * 0.8;
+            cv::Point maxloc;
+            minMaxLoc(res, NULL, &maxval, NULL, &maxloc);
+
+            if (maxval >= threshold)
+            {
+                found_similar.emplace_back(
+                    maxloc,
+                    cv::Point(maxloc.x + templates[i].img.cols,
+                              maxloc.y + templates[i].img.rows));
+                floodFill(res, maxloc, 0);
+            }
+            else
+                break;
+        }
+
+        if (found_similar.size() > 1)
+        {
+            cv::Scalar color(rng.uniform(0., 255.),
+                             rng.uniform(0., 255.),
+                             rng.uniform(0., 255.));
+
+            for (auto& object : found_similar)
+                for (int j = i; j < templates.size(); j++)
+                    if (!templates[j].have_similar)
+                    {
+                        cv::Rect intersect_rect =
+                            cv::boundingRect(templates[j].contour_) & object;
+                        double coef =
+                            static_cast<double>(intersect_rect.area()) /
+                            object.area();
+
+                        if (coef > 0.7)
+                        {
+                            cv::RotatedRect min_rect =
+                                cv::minAreaRect(templates[j].contour_);
+
+                            cv::Point2f points[4];
+                            min_rect.points(points);
+
+                            for (int k = 0; k < 4; k++)
+                                line(src,
+                                     points[k],
+                                     points[(k + 1) % 4],
+                                     color,
+                                     2);
+
+                            templates[j].have_similar = true;
+                        }
+                    }
+        }
+
+        cv::waitKey(0);
     }
 
-    cv::imshow("result", copy);
-
-    cv::waitKey();
-    return 0;
-}
-
-cv::Mat difference_of_gaussians(
-    cv::Mat& src, int k1, double s1, int k2, double s2)
-{
-    cv::Mat gaus_blur_output1;
-    cv::Mat gaus_blur_output2;
-    cv::GaussianBlur(src, gaus_blur_output1, cv::Size{ k1, k1 }, s1);
-    cv::GaussianBlur(src, gaus_blur_output2, cv::Size{ k2, k2 }, s2);
-
-    return substract_no_saturation(gaus_blur_output1, gaus_blur_output2);
-}
-
-cv::Mat substract_no_saturation(cv::Mat& mat1, cv::Mat& mat2)
-{
-    assert(mat1.rows == mat2.rows || mat1.cols == mat2.cols);
-
-    cv::Mat result(mat1.rows, mat1.cols, mat1.type());
-    for (int row = 0; row < mat1.rows; row++)
-        for (int col = 0; col < mat1.cols; col++)
-            result.at<uint8_t>(row, col) =
-                mat1.at<uint8_t>(row, col) - mat2.at<uint8_t>(row, col);
-
-    return result;
+    imshow("final", src);
+    cv::waitKey(0);
 }
