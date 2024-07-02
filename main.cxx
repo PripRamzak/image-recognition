@@ -43,12 +43,12 @@ int main(int argc, char** argv)
     cv::Mat canny;
     cv::Canny(filtred, canny, 25., 50.);
 
-    imshow("canny", filtred);
+    imshow("canny", canny);
     cv::waitKey(0);
 
     cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2));
     cv::Mat closed;
-    cv::morphologyEx(filtred, closed, cv::MORPH_CLOSE, kernel);
+    cv::morphologyEx(canny, closed, cv::MORPH_CLOSE, kernel);
     imshow("morph", closed);
 
     std::vector<contour> contours;
@@ -120,7 +120,7 @@ int main(int argc, char** argv)
                     : templates[i].img.copyTo(templ_rotated);
             imshow("template", templ_rotated);
 
-            cv::matchTemplate(src, templ_rotated, res, cv::TM_CCOEFF_NORMED);
+            cv::matchTemplate(gray, templ_rotated, res, cv::TM_CCOEFF_NORMED);
 
             res.convertTo(res, CV_8U, 255.);
             imshow("match", res);
